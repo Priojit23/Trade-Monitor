@@ -1,0 +1,180 @@
+import MetaTrader5 as mt5
+import time
+import pandas as pd
+from datetime import datetime
+
+# Initialize MetaTrader5
+if not mt5.initialize():
+    print("Initialization failed")
+    print("Error:", mt5.last_error())
+    quit()
+else:
+    print("Initialization successful")
+
+# Login to account
+authorized = mt5.login(login=55683316, password="b2%q(1Dhn!<?", server="Tickmill-Live")
+if authorized:
+    print("Connected successfully")
+else:
+    print(f"Failed to connect to account: {mt5.last_error()}")
+    mt5.shutdown()
+    quit()
+
+# Define schedule with symbols, action, time, and lot size
+schedule = [
+    {"symbol": "EURUSD", "action": "buy", "hour": 18, "minute": 34, "volume": 0.03},
+    {"symbol": "GBPUSD", "action": "sell", "hour": 19, "minute": 5, "volume": 0.02},
+    {"symbol": "USDJPY", "action": "buy", "hour": 19, "minute": 47, "volume": 0.07},
+    {"symbol": "GBPJPY", "action": "buy", "hour": 20, "minute": 16, "volume": 0.1},
+    {"symbol": "USTEC", "action": "sell", "hour": 20, "minute": 58, "volume": 0.6},
+    {"symbol": "XAUUSD", "action": "buy", "hour": 21, "minute": 27, "volume": 0.09},
+    {"symbol": "XTIUSD", "action": "sell", "hour": 22, "minute": 2, "volume": 1.0},
+    {"symbol": "US500", "action": "buy", "hour": 22, "minute": 39, "volume": 0.85},
+    {"symbol": "US30", "action": "sell", "hour": 23, "minute": 4, "volume": 0.15},
+    {"symbol": "DE40", "action": "buy", "hour": 23, "minute": 39, "volume": 0.05},
+]
+
+# Prepare an empty DataFrame to store the logs
+columns = ["Symbol", "Action", "Lot", "Desired Price", "Executed Price", "Slippage (pipettes)", "Latency (ms)", "Trade Time", "PnL"]
+trade_log_df = pd.DataFrame(columns=columns)
+
+# Dictionary to keep track of the last trade time for each symbol
+last_trade_time = {}
+
+def place_order(symbol, action, volume):
+    # Get the latest tick data to capture desired price before sending the order
+    tick = mt5.symbol_info_tick(symbol)
+    if not tick:
+        print(f"Symbol {symbol} not found or no tick data available")
+        return None
+
+    # Capture "desired" price and time
+    desired_price = tick.ask if action == "buy" else tick.bid
+    desired_time = datetime.now()  # Local time right before sending the order
+    desired_time_ms = int(desired_time.timestamp() * 1000)  # Convert to milliseconds for latency calculation
+    print(f"{action.capitalize()} Order for {symbol} at Desired Price: {desired_price}")
+    print(f"Desired Time (Local): {desired_time}")
+
+    # Define the order request
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": mt5.ORDER_TYPE_BUY if action == "buy" else mt5.ORDER_TYPE_SELL,
+        "price": desired_price,  # Set the price to the desired price
+        "deviation": 100,  # Increased deviation for flexibility
+        "magic": 123456,
+        "comment": "Scheduled Order",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    # Send the order
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"Order failed with error code: {result.retcode}")
+        return
+
+    print("Order sent successfully")
+
+    # Wait for the position to be available and capture executed price and time
+    retries = 10  # Retry limit
+    executed_price = None
+    executed_time = None
+    while retries > 0:
+        position = mt5.positions_get(symbol=symbol)
+        if position:
+            # Capture executed price and time
+            executed_price = position[0].price_open
+            executed_time = datetime.now()  # Local system time for executed trade
+            executed_time_ms = int(executed_time.timestamp() * 1000)
+
+            # Calculate latency in milliseconds
+            latency = executed_time_ms - desired_time_ms
+            trade_time = executed_time.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Calculate slippage in pipettes
+            point_size = mt5.symbol_info(symbol).point
+            slippage = abs((executed_price - desired_price) / point_size)  # Convert to pipettes
+
+            print(f"Executed Price: {executed_price}")
+            print(f"Executed Time (Local): {executed_time}")
+            print(f"Latency (milliseconds): {latency}")
+            print(f"Trade Time: {trade_time}")
+            print(f"Slippage (pipettes): {slippage}")
+
+            # Log the trade details
+            trade_log_df.loc[len(trade_log_df)] = [symbol, action, volume, desired_price, executed_price, round(slippage, 1), latency, trade_time, position[0].profit]
+
+            # Save to Excel file after each trade
+            trade_log_df.to_excel("trade_execution_log.xlsx", index=False)
+
+            # Close the trade immediately
+            close_order(symbol, position[0].ticket, action, volume)
+            break
+        else:
+            print("Waiting for position to be available...")
+            time.sleep(0.01)
+            retries -= 1
+
+    if executed_price is None:
+        print("Executed price could not be captured due to position unavailability.")
+
+def close_order(symbol, ticket, action, volume):
+    # Define the close request based on the opposite of the initial action
+    close_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": mt5.ORDER_TYPE_SELL if action == "buy" else mt5.ORDER_TYPE_BUY,
+        "position": ticket,
+        "price": mt5.symbol_info_tick(symbol).bid if action == "buy" else mt5.symbol_info_tick(symbol).ask,
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "Auto Close Order",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    # Send the close request
+    close_result = mt5.order_send(close_request)
+    if close_result.retcode == mt5.TRADE_RETCODE_DONE:
+        print(f"Position for {symbol} closed successfully.")
+    else:
+        print(f"Failed to close position for {symbol}. Error code: {close_result.retcode}")
+
+# Main loop to check for scheduled orders
+print("Waiting for scheduled times...")
+
+try:
+    while True:
+        # Get the current local time
+        now = datetime.now()
+
+        # Loop through each scheduled order
+        for order in schedule:
+            # Check if the current time matches the scheduled time
+            if now.hour == order["hour"] and now.minute == order["minute"]:
+                # Check if this symbol has already traded within this minute
+                if order["symbol"] in last_trade_time:
+                    last_trade_dt = last_trade_time[order["symbol"]]
+                    # Skip if a trade for this symbol was executed within this same minute
+                    if last_trade_dt.hour == now.hour and last_trade_dt.minute == now.minute:
+                        continue
+
+                # Execute the trade and update the last trade time for the symbol
+                print(f"Scheduled time reached for {order['symbol']} ({order['action'].capitalize()}) at {now.strftime('%H:%M:%S')}")
+                place_order(order["symbol"], order["action"], order["volume"])
+
+                # Update last trade time for this symbol
+                last_trade_time[order["symbol"]] = now
+
+                # Prevent multiple executions within the same minute
+                time.sleep(30)
+
+        time.sleep(0.01)  # Check every second
+except KeyboardInterrupt:
+    print("Script interrupted.")
+
+# Shutdown MetaTrader5 when done
+mt5.shutdown()
