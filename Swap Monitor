@@ -1,0 +1,53 @@
+import MetaTrader5 as mt5
+import pandas as pd
+
+# Initialize MT5
+if not mt5.initialize():
+    print("Failed to initialize MT5")
+    print(f"Error: {mt5.last_error()}")
+    quit()
+
+# Login to account
+account = 200281  # Replace with your account number
+password = "ty5@mfUeVC?X"  # Replace with your account password
+server = "FNmarkets-Server"  # Replace with your broker's server name
+
+if not mt5.login(account, password=password, server=server):
+    print(f"Failed to log in to account. Error: {mt5.last_error()}")
+    mt5.shutdown()
+    quit()
+
+print("Successfully logged in to account")
+
+# Fetch all symbols available in the account
+symbols = mt5.symbols_get()
+if not symbols:
+    print("No symbols found")
+    mt5.shutdown()
+    quit()
+
+# Prepare a list to store the swap details
+swap_data = []
+
+# Loop through each symbol to get swap rates
+for symbol in symbols:
+    symbol_info = mt5.symbol_info(symbol.name)
+    if symbol_info:  # Ensure the symbol info is valid
+        swap_data.append({
+            "Symbol": symbol.name,
+            "Swap Long": symbol_info.swap_long,
+            "Swap Short": symbol_info.swap_short
+        })
+    else:
+        print(f"Failed to retrieve info for symbol: {symbol.name}")
+
+# Convert the data to a DataFrame
+df = pd.DataFrame(swap_data)
+
+# Save the swaps to an Excel file
+output_file = "swap.xlsx"
+df.to_excel(output_file, index=False)
+print(f"Swap details saved to {output_file}")
+
+# Shutdown MT5
+mt5.shutdown()
